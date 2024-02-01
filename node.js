@@ -77,7 +77,9 @@ app.get('/retrieve', async (req, res) => {
     res.status(500).send('Error retrieving file');
   }
 });
-
+app.get('/', async (req, res) => {
+      res.status(200).send('Hello');
+  });
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}.`);
