@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import cors from 'cors';
 import crypto from 'crypto';
@@ -32,14 +32,25 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     }
 
   const key = generateAccessCode();
-  let type = req.body.type.split("/")[1]
+
+  let type = req.body.type.split("/")[1];
+
+  let preceed = req.body.type.split("/")[0];
+
+  if(preceed === 'application'){
+        type = preceed + '/' + type
+  }
+  
   const uploadParams = {
     Bucket: process.env.S3_BUCKET_NAME,
     Key: `${key}`, // Consider including an access code or unique identifier in the key
     Body: file.buffer,
     ServerSideEncryption: "AES256",
-    ContentType: type, // Set the content type based on the uploaded file
-  };
+    ContentType: type,
+    Metadata: {
+        'filetype': req.body.type // Custom metadata for file type
+    }
+};
 
   try {
     await s3Client.send(new PutObjectCommand(uploadParams));
