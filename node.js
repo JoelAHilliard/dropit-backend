@@ -97,6 +97,7 @@ const PORT = process.env.PORT || 5001;
 
 async function deleteOldFiles() {
   const thirtyMinutesAgo = new Date(Date.now() - 5 * 60000);
+  console.log("deleting old objs")
   try {
     const { Contents } = await s3Client.send(new ListObjectsV2Command({
       Bucket: process.env.S3_BUCKET_NAME,
