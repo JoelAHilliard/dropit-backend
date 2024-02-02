@@ -9,6 +9,7 @@ const generateAccessCode = () => {
     return crypto.randomBytes(3).toString('hex'); // 3 bytes = 6 hexadecimal characters
 };
 dotenv.config();
+import cron from 'node-cron';
 
 const app = express();
 app.use(cors());
@@ -92,6 +93,36 @@ app.get('/', async (req, res) => {
       res.status(200).send('Hello');
   });
 const PORT = process.env.PORT || 5001;
+
+
+async function deleteOldFiles() {
+  const thirtyMinutesAgo = new Date(Date.now() - 5 * 60000);
+  try {
+    const { Contents } = await s3Client.send(new ListObjectsV2Command({
+      Bucket: process.env.S3_BUCKET_NAME,
+    }));
+
+    const toDelete = Contents.filter(file => 
+      file.LastModified < thirtyMinutesAgo
+    ).map(file => ({ Key: file.Key }));
+
+    if (toDelete.length > 0) {
+      await s3Client.send(new DeleteObjectsCommand({
+        Bucket: process.env.S3_BUCKET_NAME,
+        Delete: {
+          Objects: toDelete,
+          Quiet: false
+        }
+      }));
+      console.log(`Deleted ${toDelete.length} old files.`);
+    } else {
+      console.log("No old files to delete.");
+    }
+  } catch (error) {
+    console.error("Error in deleting old files:", error);
+  }
+}
+cron.schedule('*/30 * * * *', deleteOldFiles);
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}.`);
 });
