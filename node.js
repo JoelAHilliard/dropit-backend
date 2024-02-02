@@ -59,7 +59,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 // you would retrieve the S3 object key using the provided access code
 app.get('/retrieve', async (req, res) => {
   const { accessCode } = req.query;
-
   if (!accessCode) {
     return res.status(400).send('Access code is required');
   }
@@ -68,6 +67,7 @@ app.get('/retrieve', async (req, res) => {
     const command = new GetObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
       Key: accessCode,
+      ResponseContentDisposition: `attachment; filename="${accessCode}"` // Customize the filename as needed
     });
     const url = await getSignedUrl(s3Client, command, { expiresIn: 3600 }); // Generate a presigned URL
 
