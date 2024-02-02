@@ -1,7 +1,7 @@
 import express from 'express';
 import multer from 'multer';
 import dotenv from 'dotenv';
-import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import cors from 'cors';
 import crypto from 'crypto';
