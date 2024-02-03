@@ -12,7 +12,7 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import cors from 'cors';
 import crypto from 'crypto';
 import cron from 'node-cron';
-
+import archiver from 'archiver';
 dotenv.config();
 
 const generateAccessCode = () => crypto.randomBytes(16); // Generates a 6-character hex string
@@ -53,9 +53,19 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 
   const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
+ // Create a buffer to store the zipped file
+  const zipBuffer = await new Promise((resolve, reject) => {
+    const archive = archiver('zip', { zlib: { level: 9 } }); // Set the compression level
+    const buffers = [];
+    archive.on('data', data => buffers.push(data));
+    archive.on('error', reject);
+    archive.on('end', () => resolve(Buffer.concat(buffers))); // Combine all buffers
 
+    archive.append(file.buffer, { name: file.originalname });
+    archive.finalize();
+  });
   // Encrypt the file content
-  let encryptedData = cipher.update(file.buffer);
+  let encryptedData = cipher.update(zipBuffer);
   encryptedData = Buffer.concat([encryptedData, cipher.final()]);
 
   const type = req.body.type;
@@ -65,7 +75,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     Key: ivHex.substring(0,6), // Use IV as the key here
     Body: encryptedData,
     ServerSideEncryption: "AES256",
-    ContentType: type,
+    ContentType: 'application/zip',
     Metadata: {
       'filetype': type
     }
@@ -119,12 +129,12 @@ app.get('/retrieve', async (req, res) => {
     const decipher = crypto.createDecipheriv('aes-256-cbc', encryptionKey, iv);
     let decryptedData = decipher.update(encryptedData);
     decryptedData = Buffer.concat([decryptedData, decipher.final()]);
-    let fileType = ContentType.split('/')[1]
+    
 
     // For simplicity, sending decrypted data as a download
     // In production, consider handling data based on its type or streaming it differently
     res.writeHead(200, {
-      'Content-Type': ContentType,
+      'Content-Type': 'application/zip',
       'Content-Disposition': `inline; filename="file"`,
     });
     res.end(decryptedData);
