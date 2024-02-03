@@ -62,7 +62,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
   const uploadParams = {
     Bucket: process.env.S3_BUCKET_NAME,
-    Key: ivHex, // Use IV as the key here
+    Key: ivHex.substring(0,6), // Use IV as the key here
     Body: encryptedData,
     ServerSideEncryption: "AES256",
     ContentType: type,
@@ -101,7 +101,7 @@ app.get('/retrieve', async (req, res) => {
   try {
     const command = new GetObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
-      Key: accessCode,
+      Key: accessCode.substring(0,6),
     });
 
     const { Body, ContentType } = await s3Client.send(command);
