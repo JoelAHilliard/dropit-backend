@@ -53,19 +53,19 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 
   const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
- // Create a buffer to store the zipped file
-  const zipBuffer = await new Promise((resolve, reject) => {
-    const archive = archiver('zip', { zlib: { level: 9 } }); // Set the compression level
-    const buffers = [];
-    archive.on('data', data => buffers.push(data));
-    archive.on('error', reject);
-    archive.on('end', () => resolve(Buffer.concat(buffers))); // Combine all buffers
+//  // Create a buffer to store the zipped file
+//   const zipBuffer = await new Promise((resolve, reject) => {
+//     const archive = archiver('zip', { zlib: { level: 9 } }); // Set the compression level
+//     const buffers = [];
+//     archive.on('data', data => buffers.push(data));
+//     archive.on('error', reject);
+//     archive.on('end', () => resolve(Buffer.concat(buffers))); // Combine all buffers
 
-    archive.append(file.buffer, { name: file.originalname });
-    archive.finalize();
-  });
+//     archive.append(file.buffer, { name: file.originalname });
+//     archive.finalize();
+//   });
   // Encrypt the file content
-  let encryptedData = cipher.update(zipBuffer);
+  let encryptedData = cipher.update(file.buffer);
   encryptedData = Buffer.concat([encryptedData, cipher.final()]);
 
   const type = req.body.type;
@@ -77,9 +77,11 @@ app.post('/upload', upload.single('file'), async (req, res) => {
     ServerSideEncryption: "AES256",
     ContentType: 'application/zip',
     Metadata: {
-      'filetype': type
+      'filetype': type,
+      'extension': file.originalname.split('.').pop() // Store file extension
     }
   };
+  
 
   try {
     await s3Client.send(new PutObjectCommand(uploadParams));
@@ -114,7 +116,7 @@ app.get('/retrieve', async (req, res) => {
       Key: accessCode.substring(0,6),
     });
 
-    const { Body, ContentType } = await s3Client.send(command);
+    const { Body, ContentType, Metadata } = await s3Client.send(command);
 
     const streamToBuffer = async (stream) =>
       new Promise((resolve, reject) => {
@@ -128,15 +130,20 @@ app.get('/retrieve', async (req, res) => {
 
     const decipher = crypto.createDecipheriv('aes-256-cbc', encryptionKey, iv);
     let decryptedData = decipher.update(encryptedData);
-    decryptedData = Buffer.concat([decryptedData, decipher.final()]);
-    
 
+    decryptedData = Buffer.concat([decryptedData, decipher.final()]);
+    let fileName = `file.${Metadata.extension || 'bin'}`;
+    const encodedFileName = encodeURIComponent(fileName);
+
+    console.log(fileName);
     // For simplicity, sending decrypted data as a download
-    // In production, consider handling data based on its type or streaming it differently
+
     res.writeHead(200, {
-      'Content-Type': 'application/zip',
-      'Content-Disposition': `inline; filename="file"`,
+      'Content-Type': 'application/octet-stream',
+      'Content-Type': Metadata.extension,
+      'Content-Disposition': `attachment; filename="${fileName}"; filename*=UTF-8''${encodedFileName}`,
     });
+    
     res.end(decryptedData);
   } catch (error) {
     console.error('Error retrieving and decrypting file:', error);
