@@ -15,8 +15,19 @@ import cron from 'node-cron';
 import archiver from 'archiver';
 dotenv.config();
 
-const generateAccessCode = () => crypto.randomBytes(16); // Generates a 6-character hex string
+function deriveIVFromAccessCode(accessCode) {
+  // Hash the access code with SHA-256.
+  const hash = crypto.createHash('sha256').update(accessCode).digest('hex');
 
+  // AES-256-CBC requires an IV of 16 bytes. We take the first 16 bytes of the hash for this.
+  // Since 1 hex character = 4 bits, 2 characters = 1 byte, so we need 32 characters of the hash to get 16 bytes.
+  const ivHex = hash.substring(0, 32);
+  
+  // Convert the hex string back to a buffer to use as an IV
+  const iv = Buffer.from(ivHex, 'hex');
+
+  return iv;
+}
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -32,19 +43,19 @@ const s3Client = new S3Client({
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
-
+function generateAccessCode(length = 6) {
+  return crypto.randomBytes(length).toString('hex').slice(0, length);
+}
 app.post('/upload', upload.single('file'), async (req, res) => {
   const file = req.file;
   if (!file) {
     return res.status(400).send('No file uploaded.');
   }
-
+  const accessCode = generateAccessCode();
   // Generate a random IV
-  const iv = crypto.randomBytes(16); // 16 bytes for AES-256-CBC
+  const iv = deriveIVFromAccessCode(accessCode);
 
   // Convert IV to hexadecimal string
-  const ivHex = iv.toString('hex');
-  
   const encryptionKeyBase64 = process.env.ENC_KEY; // Assuming the key is stored in base64
   
   const encryptionKey = Buffer.from(encryptionKeyBase64, 'base64'); // Convert from base64 to binary
@@ -56,19 +67,19 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
   // Encrypt the file content
   let encryptedData = cipher.update(file.buffer);
+  
   encryptedData = Buffer.concat([encryptedData, cipher.final()]);
 
   const type = req.body.type;
 
   const uploadParams = {
     Bucket: process.env.S3_BUCKET_NAME,
-    Key: ivHex.slice(0,6), // Use IV as the key here
+    Key: accessCode, // Use IV as the key here
     Body: encryptedData,
     ServerSideEncryption: "AES256",
     ContentType: 'application/zip',
     Metadata: {
       'filetype': type,
-      'iv': ivHex,
       'extension': file.originalname.split('.').pop() // Store file extension
     }
   };
@@ -76,7 +87,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
   try {
     await s3Client.send(new PutObjectCommand(uploadParams));
-    res.json({ message: 'File uploaded successfully', key: ivHex.substring(0,6) });
+    res.json({ message: 'File uploaded successfully', key: accessCode });
   } catch (error) {
     console.error('Error uploading encrypted file:', error);
     res.status(500).send(error.message);
@@ -88,6 +99,8 @@ app.get('/retrieve', async (req, res) => {
   if (!accessCode) {
     return res.status(400).send('Access code is required');
   }
+
+  const iv = deriveIVFromAccessCode(accessCode)
 
   const encryptionKeyBase64 = process.env.ENC_KEY;
   
@@ -104,7 +117,6 @@ app.get('/retrieve', async (req, res) => {
     });
 
     const { Body, ContentType, Metadata } = await s3Client.send(command);
-    const iv = Buffer.from(Metadata.iv, 'hex'); // Convert hex back to binary
 
     const streamToBuffer = async (stream) =>
       new Promise((resolve, reject) => {
