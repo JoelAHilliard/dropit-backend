@@ -14,6 +14,20 @@ import crypto from 'crypto';
 import cron from 'node-cron';
 import archiver from 'archiver';
 dotenv.config();
+let globalUploadCounter = 0;
+let globalUploadSize = 0; // in MB
+let pauseUploadsDownloads = false;
+
+const checkAndPauseUploadsDownloads = () => {
+  if (globalUploadCounter >= 25 || globalUploadSize >= 100) {
+    pauseUploadsDownloads = true;
+    console.log('Uploads/Downloads paused for 1 hour due to DDoS protection.');
+    setTimeout(() => {
+      pauseUploadsDownloads = false;
+      console.log('Uploads/Downloads resumed.');
+    }, 3600000); // 1 hour in milliseconds
+  }
+};
 
 function deriveIVFromAccessCode(accessCode) {
   // Hash the access code with SHA-256.
@@ -43,14 +57,27 @@ const s3Client = new S3Client({
 });
 
 const upload = multer({ storage: multer.memoryStorage() });
+
 function generateAccessCode(length = 6) {
   return crypto.randomBytes(length).toString('hex').slice(0, length);
 }
 app.post('/upload', upload.single('file'), async (req, res) => {
+
+  if (pauseUploadsDownloads) {
+    return res.status(503).send('Service temporarily unavailable due to high traffic.');
+  }
+
   const file = req.file;
+
   if (!file) {
     return res.status(400).send('No file uploaded.');
   }
+
+  globalUploadCounter += 1;
+  globalUploadSize += file.size / (1024 * 1024); // Convert bytes to MB
+  
+  checkAndPauseUploadsDownloads();
+  
   const accessCode = generateAccessCode();
   // Generate a random IV
   const iv = deriveIVFromAccessCode(accessCode);
@@ -67,7 +94,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
   // Encrypt the file content
   let encryptedData = cipher.update(file.buffer);
-  
+
   encryptedData = Buffer.concat([encryptedData, cipher.final()]);
 
   const type = req.body.type;
@@ -95,6 +122,10 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 app.get('/retrieve', async (req, res) => {
+
+  if (pauseUploadsDownloads) {
+    return res.status(503).send('Service temporarily unavailable due to high traffic.');
+  }
   const { accessCode } = req.query; // `accessCode` is the IV in hex
   if (!accessCode) {
     return res.status(400).send('Access code is required');
@@ -187,7 +218,11 @@ async function deleteOldFiles() {
 }
 
 cron.schedule('*/30 * * * *', deleteOldFiles);
-
+cron.schedule('*/30 * * * *', () => {
+  globalUploadCounter = 0;
+  globalUploadSize = 0;
+  console.log('Upload counter and size reset.');
+});
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}.`);
 });
