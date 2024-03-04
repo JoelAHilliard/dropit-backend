@@ -44,8 +44,9 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
   // Convert IV to hexadecimal string
   const ivHex = iv.toString('hex');
-
+  
   const encryptionKeyBase64 = process.env.ENC_KEY; // Assuming the key is stored in base64
+  
   const encryptionKey = Buffer.from(encryptionKeyBase64, 'base64'); // Convert from base64 to binary
 
   if (encryptionKey.length !== 32) {
@@ -53,17 +54,6 @@ app.post('/upload', upload.single('file'), async (req, res) => {
   }
 
   const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
-//  // Create a buffer to store the zipped file
-//   const zipBuffer = await new Promise((resolve, reject) => {
-//     const archive = archiver('zip', { zlib: { level: 9 } }); // Set the compression level
-//     const buffers = [];
-//     archive.on('data', data => buffers.push(data));
-//     archive.on('error', reject);
-//     archive.on('end', () => resolve(Buffer.concat(buffers))); // Combine all buffers
-
-//     archive.append(file.buffer, { name: file.originalname });
-//     archive.finalize();
-//   });
   // Encrypt the file content
   let encryptedData = cipher.update(file.buffer);
   encryptedData = Buffer.concat([encryptedData, cipher.final()]);
@@ -72,12 +62,13 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
   const uploadParams = {
     Bucket: process.env.S3_BUCKET_NAME,
-    Key: ivHex.substring(0,6), // Use IV as the key here
+    Key: ivHex.slice(0,6), // Use IV as the key here
     Body: encryptedData,
     ServerSideEncryption: "AES256",
     ContentType: 'application/zip',
     Metadata: {
       'filetype': type,
+      'iv': ivHex,
       'extension': file.originalname.split('.').pop() // Store file extension
     }
   };
@@ -85,7 +76,7 @@ app.post('/upload', upload.single('file'), async (req, res) => {
 
   try {
     await s3Client.send(new PutObjectCommand(uploadParams));
-    res.json({ message: 'File uploaded successfully', key: ivHex });
+    res.json({ message: 'File uploaded successfully', key: ivHex.substring(0,6) });
   } catch (error) {
     console.error('Error uploading encrypted file:', error);
     res.status(500).send(error.message);
@@ -98,14 +89,10 @@ app.get('/retrieve', async (req, res) => {
     return res.status(400).send('Access code is required');
   }
 
-  const iv = Buffer.from(accessCode, 'hex'); // Convert hex back to binary
-
-  if (iv.length !== 16) {
-    return res.status(400).send('Invalid access code');
-  }
-
   const encryptionKeyBase64 = process.env.ENC_KEY;
+  
   const encryptionKey = Buffer.from(encryptionKeyBase64, 'base64');
+  
   if (encryptionKey.length !== 32) {
     return res.status(500).send('Server error: Invalid encryption key');
   }
@@ -113,10 +100,11 @@ app.get('/retrieve', async (req, res) => {
   try {
     const command = new GetObjectCommand({
       Bucket: process.env.S3_BUCKET_NAME,
-      Key: accessCode.substring(0,6),
+      Key: accessCode,
     });
 
     const { Body, ContentType, Metadata } = await s3Client.send(command);
+    const iv = Buffer.from(Metadata.iv, 'hex'); // Convert hex back to binary
 
     const streamToBuffer = async (stream) =>
       new Promise((resolve, reject) => {
@@ -156,7 +144,7 @@ app.get('/', async (req, res) => {
   res.status(200).send('Hello');
 });
 
-const PORT = process.env.PORT || 5001;
+const PORT = 4000;
 
 async function deleteOldFiles() {
   const thirtyMinutesAgo = new Date(Date.now() - 30 * 60000);
