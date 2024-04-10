@@ -8,44 +8,13 @@ import {
   ListObjectsV2Command,
   DeleteObjectsCommand
 } from '@aws-sdk/client-s3';
-import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import cors from 'cors';
 import crypto from 'crypto';
 import cron from 'node-cron';
-import archiver from 'archiver';
 dotenv.config();
 let globalUploadCounter = 0;
 let globalUploadSize = 0; // in MB
 let pauseUploadsDownloads = false;
-
-const checkAndPauseUploadsDownloads = () => {
-  if (globalUploadCounter >= 25 || globalUploadSize >= 100) {
-    pauseUploadsDownloads = true;
-    console.log('Uploads/Downloads paused for 1 hour due to DDoS protection.');
-    setTimeout(() => {
-      pauseUploadsDownloads = false;
-      console.log('Uploads/Downloads resumed.');
-    }, 3600000); // 1 hour in milliseconds
-  }
-};
-
-function deriveIVFromAccessCode(accessCode) {
-  // Hash the access code with SHA-256.
-  const hash = crypto.createHash('sha256').update(accessCode).digest('hex');
-
-  // AES-256-CBC requires an IV of 16 bytes. We take the first 16 bytes of the hash for this.
-  // Since 1 hex character = 4 bits, 2 characters = 1 byte, so we need 32 characters of the hash to get 16 bytes.
-  const ivHex = hash.substring(0, 32);
-  
-  // Convert the hex string back to a buffer to use as an IV
-  const iv = Buffer.from(ivHex, 'hex');
-
-  return iv;
-}
-const app = express();
-app.use(cors());
-app.use(express.json());
-// Configure the S3Client for Cloudflare R2
 const s3Client = new S3Client({
   region: 'auto', // Cloudflare R2 does not require a specific region, but 'auto' works
   endpoint: process.env.CLOUDFLARE_R2_ENDPOINT, // Your Cloudflare R2 endpoint
@@ -58,136 +27,27 @@ const s3Client = new S3Client({
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-function generateAccessCode(length = 6) {
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+// Configure the S3Client for Cloudflare R2
+
+
+const checkAndPauseUploadsDownloads = () => {
+  if (globalUploadCounter >= 25 || globalUploadSize >= 100) {
+    pauseUploadsDownloads = true;
+    console.log('Uploads/Downloads paused for 1 hour due to DDoS protection.');
+    setTimeout(() => {
+      pauseUploadsDownloads = false;
+      console.log('Uploads/Downloads resumed.');
+    }, 3600000); // 1 hour in milliseconds
+  }
+};
+
+function generateAccessCode(length = 4) {
   return crypto.randomBytes(length).toString('hex').slice(0, length);
 }
-app.post('/upload', upload.single('file'), async (req, res) => {
-
-  if (pauseUploadsDownloads) {
-    return res.status(503).send('Service temporarily unavailable due to high traffic.');
-  }
-
-  const file = req.file;
-
-  if (!file) {
-    return res.status(400).send('No file uploaded.');
-  }
-
-  globalUploadCounter += 1;
-  globalUploadSize += file.size / (1024 * 1024); // Convert bytes to MB
-  
-  checkAndPauseUploadsDownloads();
-  
-  const accessCode = generateAccessCode();
-  // Generate a random IV
-  const iv = deriveIVFromAccessCode(accessCode);
-
-  // Convert IV to hexadecimal string
-  const encryptionKeyBase64 = process.env.ENC_KEY; // Assuming the key is stored in base64
-  
-  const encryptionKey = Buffer.from(encryptionKeyBase64, 'base64'); // Convert from base64 to binary
-
-  if (encryptionKey.length !== 32) {
-    throw new Error('Encryption key must be 32 bytes long.');
-  }
-
-  const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
-  // Encrypt the file content
-  let encryptedData = cipher.update(file.buffer);
-
-  encryptedData = Buffer.concat([encryptedData, cipher.final()]);
-
-  const type = req.body.type;
-
-  const uploadParams = {
-    Bucket: process.env.S3_BUCKET_NAME,
-    Key: accessCode, // Use IV as the key here
-    Body: encryptedData,
-    ServerSideEncryption: "AES256",
-    ContentType: 'application/zip',
-    Metadata: {
-      'filetype': type,
-      'extension': file.originalname.split('.').pop() // Store file extension
-    }
-  };
-  
-
-  try {
-    await s3Client.send(new PutObjectCommand(uploadParams));
-    res.json({ message: 'File uploaded successfully', key: accessCode });
-  } catch (error) {
-    console.error('Error uploading encrypted file:', error);
-    res.status(500).send(error.message);
-  }
-});
-
-app.get('/retrieve', async (req, res) => {
-
-  if (pauseUploadsDownloads) {
-    return res.status(503).send('Service temporarily unavailable due to high traffic.');
-  }
-  const { accessCode } = req.query; // `accessCode` is the IV in hex
-  if (!accessCode) {
-    return res.status(400).send('Access code is required');
-  }
-
-  const iv = deriveIVFromAccessCode(accessCode)
-
-  const encryptionKeyBase64 = process.env.ENC_KEY;
-  
-  const encryptionKey = Buffer.from(encryptionKeyBase64, 'base64');
-  
-  if (encryptionKey.length !== 32) {
-    return res.status(500).send('Server error: Invalid encryption key');
-  }
-
-  try {
-    const command = new GetObjectCommand({
-      Bucket: process.env.S3_BUCKET_NAME,
-      Key: accessCode,
-    });
-
-    const { Body, ContentType, Metadata } = await s3Client.send(command);
-
-    const streamToBuffer = async (stream) =>
-      new Promise((resolve, reject) => {
-        const chunks = [];
-        stream.on('data', (chunk) => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', reject);
-      });
-
-    const encryptedData = await streamToBuffer(Body);
-
-    const decipher = crypto.createDecipheriv('aes-256-cbc', encryptionKey, iv);
-    let decryptedData = decipher.update(encryptedData);
-
-    decryptedData = Buffer.concat([decryptedData, decipher.final()]);
-    let fileName = `file.${Metadata.extension || 'bin'}`;
-    const encodedFileName = encodeURIComponent(fileName);
-
-    console.log(fileName);
-    // For simplicity, sending decrypted data as a download
-
-    res.writeHead(200, {
-      'Content-Type': 'application/octet-stream',
-      'Content-Type': Metadata.extension,
-      'Content-Disposition': `attachment; filename="${fileName}"; filename*=UTF-8''${encodedFileName}`,
-    });
-    
-    res.end(decryptedData);
-  } catch (error) {
-    console.error('Error retrieving and decrypting file:', error);
-    res.status(500).send('Error retrieving file');
-  }
-});
-
-
-app.get('/', async (req, res) => {
-  res.status(200).send('Hello');
-});
-
-const PORT = 4000;
 
 async function deleteOldFiles() {
   const thirtyMinutesAgo = new Date(Date.now() - 30 * 60000);
@@ -216,6 +76,134 @@ async function deleteOldFiles() {
     console.error("Error in deleting old files:", error);
   }
 }
+
+app.post('/upload', upload.single('file'), async (req, res) => {
+
+  if (pauseUploadsDownloads) {
+    return res.status(503).send('Service temporarily unavailable due to high traffic.');
+  }
+
+  const file = req.file;
+
+  const secretWord = req.body.secretWord;
+
+  if (!file) {
+    return res.status(400).send('No file uploaded.');
+  }
+
+  globalUploadCounter += 1;
+  globalUploadSize += file.size / (1024 * 1024); // Convert bytes to MB
+  
+  checkAndPauseUploadsDownloads();
+  
+  const accessCode = generateAccessCode();
+  // Generate a random IV
+  const iv = crypto.randomBytes(16);
+
+  // Convert IV to hexadecimal string
+  const encryptionKey = crypto.createHash('sha256').update(secretWord).digest();
+
+  if (encryptionKey.length !== 32) {
+    throw new Error('Encryption key must be 32 bytes long.');
+  }
+
+  const cipher = crypto.createCipheriv('aes-256-cbc', encryptionKey, iv);
+  // Encrypt the file content
+  let encryptedData = cipher.update(file.buffer);
+
+  encryptedData = Buffer.concat([encryptedData, cipher.final()]);
+
+  const type = req.body.type;
+
+  const uploadParams = {
+    Bucket: process.env.S3_BUCKET_NAME,
+    Key: accessCode, // Use IV as the key here
+    Body: encryptedData,
+    ServerSideEncryption: "AES256",
+    ContentType: 'application/zip',
+    Metadata: {
+      'filetype': type,
+      'iv': iv.toString('hex'),
+      'extension': file.originalname.split('.').pop() // Store file extension
+    }
+  };
+  
+
+  try {
+    await s3Client.send(new PutObjectCommand(uploadParams));
+    res.json({ message: 'File uploaded successfully', key: accessCode });
+  } catch (error) {
+    console.error('Error uploading encrypted file:', error);
+    res.status(500).send(error.message);
+  }
+});
+
+app.get('/retrieve', async (req, res) => {
+
+  if (pauseUploadsDownloads) {
+    return res.status(503).send('Service temporarily unavailable due to high traffic.');
+  }
+  const { accessCode, secretWord } = req.query; // `accessCode` is the IV in hex
+
+  if (!accessCode) {
+    return res.status(400).send('Access code is required');
+  }
+
+  try {
+    const command = new GetObjectCommand({
+      Bucket: process.env.S3_BUCKET_NAME,
+      Key: accessCode,
+    });
+
+    const { Body, ContentType, Metadata } = await s3Client.send(command);
+
+    const streamToBuffer = async (stream) =>
+      new Promise((resolve, reject) => {
+        const chunks = [];
+        stream.on('data', (chunk) => chunks.push(chunk));
+        stream.on('end', () => resolve(Buffer.concat(chunks)));
+        stream.on('error', reject);
+      });
+
+    const encryptedData = await streamToBuffer(Body);
+    
+    const ivHex = Metadata.iv;
+    
+    const iv = Buffer.from(ivHex,'hex');
+    const decryptionKey = crypto.createHash('sha256').update(secretWord).digest();
+
+    const decipher = crypto.createDecipheriv('aes-256-cbc', decryptionKey, iv);
+    let decryptedData = decipher.update(encryptedData);
+
+    decryptedData = Buffer.concat([decryptedData, decipher.final()]);
+    
+    let fileName = `file.${Metadata.extension || 'bin'}`;
+
+    const encodedFileName = encodeURIComponent(fileName);
+
+    console.log(fileName);
+    // For simplicity, sending decrypted data as a download
+
+    res.writeHead(200, {
+      'Content-Type': 'application/octet-stream',
+      'Content-Type': Metadata.extension,
+      'Content-Disposition': `attachment; filename="${fileName}"; filename*=UTF-8''${encodedFileName}`,
+    });
+    
+    res.end(decryptedData);
+  } catch (error) {
+    console.error('Error retrieving and decrypting file:', error);
+    res.status(500).send('Error retrieving file');
+  }
+});
+
+app.get('/', async (req, res) => {
+  res.status(200).send('Hello');
+});
+
+const PORT = 4000;
+
+
 
 cron.schedule('*/30 * * * *', deleteOldFiles);
 cron.schedule('*/30 * * * *', () => {
